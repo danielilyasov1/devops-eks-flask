@@ -1,0 +1,63 @@
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  EKS_CLUSTER_NAME: devops-eks-flask-cluster
+  ECR_REPO: devops-eks-flask/flask-app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG
+          echo "IMAGE=$ECR_REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Deploy with Helm
+        run: |
+          REPO=$(echo "$IMAGE" | cut -d: -f1)
+          TAG=$(echo "$IMAGE" | cut -d: -f2)
+          helm upgrade --install flask-app ./helm/flask-app \
+            --set image.repository=$REPO \
+            --set image.tag=$TAG
